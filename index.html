@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AuraCell | Oda Video Kontrol</title>
+<style>
+:root{font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;background:#0b1020;color:#eef2ff}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#0b1020,#111827);min-height:100vh}.wrap{max-width:1100px;margin:auto;padding:24px}.card{background:#151c2f;border:1px solid #2b3654;border-radius:18px;padding:20px;margin:16px 0;box-shadow:0 12px 35px rgba(0,0,0,.25)}h1,h2{margin:0 0 8px}.muted{color:#aab3ca}.grid{display:grid;grid-template-columns:1.1fr .9fr;gap:16px}@media(max-width:800px){.grid{grid-template-columns:1fr}}input,button,select{font:inherit}input,select{width:100%;padding:12px 14px;background:#0e1526;color:#fff;border:1px solid #34405e;border-radius:12px;margin:8px 0}button{padding:11px 15px;border:0;border-radius:12px;background:#5b8cff;color:#fff;font-weight:700;cursor:pointer}button.danger{background:#db4455}button.secondary{background:#283552}button:disabled{opacity:.45;cursor:not-allowed}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.room{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px;border:1px solid #2c3855;border-radius:14px;margin:8px 0}.room.active{outline:2px solid #5b8cff}.badge{display:inline-block;padding:4px 9px;border-radius:99px;background:#22304e;font-size:.8rem}.ok{background:#164b39}.off{background:#4b2630}.stat{font-size:2rem;font-weight:800}.small{font-size:.85rem}.hidden{display:none}.dangerText{color:#ff8996}.successText{color:#6ee7b7}#loginCard{max-width:520px;margin:8vh auto 0}.label{font-size:.9rem;color:#c7d0e6;margin-top:8px;display:block}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="loginCard" class="card">
+    <h1>AuraCell</h1>
+    <p class="muted">Aura X odalarının YouTube izin ve süre yönetimi.</p>
+    <label class="label">Firebase Auth e-posta</label><input id="email" type="email" autocomplete="username" placeholder="AuraCell admin hesabı">
+    <label class="label">Şifre</label><input id="password" type="password" autocomplete="current-password" placeholder="Firebase Auth şifresi">
+    <button id="loginBtn" onclick="login()">Giriş Yap</button>
+    <div id="loginMsg" class="small muted" style="margin-top:10px"></div>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="row" style="justify-content:space-between">
+      <div><h1>AuraCell</h1><div class="muted">Aura X video odaları</div></div>
+      <button class="secondary" onclick="logout()">Çıkış</button>
+    </div>
+    <div class="grid">
+      <section class="card">
+        <h2>Odalar</h2><p class="muted">Firebase'deki odaları anlık dinler.</p>
+        <div id="rooms"></div>
+      </section>
+      <section class="card">
+        <h2>Seçili Oda</h2>
+        <div id="selectedEmpty" class="muted">Soldan bir oda seç.</div>
+        <div id="selected" class="hidden">
+          <div class="badge" id="roomName"></div>
+          <p id="statusLine" class="muted"></p>
+          <div class="stat" id="remaining">0 dk</div>
+          <div class="small muted" id="expireText"></div>
+          <label class="label">Verilecek süre (dakika)</label>
+          <input id="minutes" type="number" min="1" max="10080" value="60">
+          <div class="row">
+            <button onclick="grant()">Süre Ver / Yenile</button>
+            <button class="danger" onclick="revoke()">YouTube'u Kapat</button>
+          </div>
+          <p id="actionMsg" class="small" style="margin-top:12px"></p>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+<script src="./firebase-config.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script>
+const firebaseConfig=window.AURACELL_FIREBASE_CONFIG;
+firebase.initializeApp(firebaseConfig); const auth=firebase.auth(); const db=firebase.firestore();
+let roomsUnsub=null, selectedId=null, selectedData=null, tick=null;
+const $=id=>document.getElementById(id);
+function show(msg,ok=false){$('loginMsg').textContent=msg;$('loginMsg').className='small '+(ok?'successText':'dangerText')}
+async function login(){try{$('loginBtn').disabled=true;show('Giriş yapılıyor…');await auth.signInWithEmailAndPassword($('email').value.trim(),$('password').value);show('');}catch(e){show('Giriş başarısız: '+(e.code||e.message));}finally{$('loginBtn').disabled=false}}
+async function logout(){await auth.signOut()}
+auth.onAuthStateChanged(async user=>{if(user){$('loginCard').classList.add('hidden');$('app').classList.remove('hidden');startRooms();}else{$('loginCard').classList.remove('hidden');$('app').classList.add('hidden');if(roomsUnsub)roomsUnsub();roomsUnsub=null;selectedId=null;selectedData=null;clearInterval(tick);}});
+function startRooms(){if(roomsUnsub)roomsUnsub();roomsUnsub=db.collection('rooms').onSnapshot(snap=>{const arr=[];snap.forEach(d=>arr.push({id:d.id,...d.data()}));arr.sort((a,b)=>a.id.localeCompare(b.id));$('rooms').innerHTML=arr.length?arr.map(r=>{const v=r.videoAccess||{};const active=!!v.enabled&&Number(v.expiresAt||0)>Date.now();return `<div class="room ${selectedId===r.id?'active':''}"><div><b>${esc(r.id)}</b><div class="small muted">${active?'YouTube açık':'YouTube kapalı'} · ${r.members?.length||0} üye</div></div><div><span class="badge ${active?'ok':'off'}">${active?'AÇIK':'KİLİTLİ'}</span><button class="secondary" style="margin-left:6px" onclick="selectRoom('${js(r.id)}')">Yönet</button></div></div>`}).join(''):'<div class="muted">Hiç oda bulunamadı.</div>';if(selectedId&&arr.find(x=>x.id===selectedId))selectRoom(selectedId,true);},e=>alert('Odalar okunamadı: '+e.message));}
+function selectRoom(id,silent=false){selectedId=id;db.collection('rooms').doc(id).get().then(d=>{if(!d.exists)return;selectedData={id:d.id,...d.data()};$('selectedEmpty').classList.add('hidden');$('selected').classList.remove('hidden');$('roomName').textContent=selectedData.id;renderSelected();if(!silent)window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});}).catch(e=>alert('Oda alınamadı: '+e.message));}
+function renderSelected(){if(!selectedData)return;const v=selectedData.videoAccess||{};let ms=Math.max(0,Number(v.expiresAt||0)-Date.now());const active=!!v.enabled&&ms>0; $('statusLine').innerHTML=active?'<span class="successText">YouTube izni aktif.</span>':'<span class="dangerText">YouTube kilitli.</span>';$('remaining').textContent=active?fmt(ms):'0 dk';$('expireText').textContent=active?'Bitiş: '+new Date(v.expiresAt).toLocaleString('tr-TR'):'Süre verilmemiş.'}
+function fmt(ms){const s=Math.ceil(ms/1000),h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;return h?`${h} sa ${m} dk`:m?`${m} dk ${sec} sn`:`${sec} sn`}
+async function grant(){if(!selectedId||!auth.currentUser)return;const mins=Math.max(1,Math.min(10080,Number($('minutes').value)||60));const now=Date.now(),expires=now+mins*60000;try{await db.collection('rooms').doc(selectedId).set({videoAccess:{enabled:true,grantedMinutes:mins,grantedAt:now,expiresAt:expires,status:'active',grantedBy:auth.currentUser.uid}}, {merge:true});msg('Süre verildi: '+mins+' dakika',true);}catch(e){msg('Yetki/işlem hatası: '+e.message,false)}}
+async function revoke(){if(!selectedId)return;try{await db.collection('rooms').doc(selectedId).set({videoAccess:{enabled:false,grantedMinutes:0,grantedAt:null,expiresAt:null,status:'revoked',revokedAt:Date.now(),revokedBy:auth.currentUser.uid}}, {merge:true});msg('YouTube kapatıldı.',true);}catch(e){msg('İşlem başarısız: '+e.message,false)}}
+function msg(t,ok){$('actionMsg').textContent=t;$('actionMsg').className='small '+(ok?'successText':'dangerText');selectRoom(selectedId,true)}
+setInterval(()=>{if(selectedData){const v=selectedData.videoAccess||{};if(v.enabled&&Number(v.expiresAt||0)<=Date.now()&&v.status==='active'){selectedData.videoAccess={...v,enabled:false,status:'expired'};}renderSelected();}},1000);
+function esc(s){return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+function js(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
+</script>
+</body>
+</html>
