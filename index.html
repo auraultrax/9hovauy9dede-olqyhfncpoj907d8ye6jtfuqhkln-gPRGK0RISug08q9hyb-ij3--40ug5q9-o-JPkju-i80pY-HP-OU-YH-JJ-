@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AuraCell | Oda Video Kontrol</title>
+<style>
+:root{font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;background:#0b1020;color:#eef2ff}*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#0b1020,#111827);min-height:100vh}.wrap{max-width:1100px;margin:auto;padding:24px}.card{background:#151c2f;border:1px solid #2b3654;border-radius:18px;padding:20px;margin:16px 0;box-shadow:0 12px 35px rgba(0,0,0,.25)}h1,h2{margin:0 0 8px}.muted{color:#aab3ca}.grid{display:grid;grid-template-columns:1.1fr .9fr;gap:16px}@media(max-width:800px){.grid{grid-template-columns:1fr}}input,button,select{font:inherit}input,select{width:100%;padding:12px 14px;background:#0e1526;color:#fff;border:1px solid #34405e;border-radius:12px;margin:8px 0}button{padding:11px 15px;border:0;border-radius:12px;background:#5b8cff;color:#fff;font-weight:700;cursor:pointer}button.danger{background:#db4455}button.secondary{background:#283552}button:disabled{opacity:.45;cursor:not-allowed}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.room{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px;border:1px solid #2c3855;border-radius:14px;margin:8px 0}.room.active{outline:2px solid #5b8cff}.badge{display:inline-block;padding:4px 9px;border-radius:99px;background:#22304e;font-size:.8rem}.ok{background:#164b39}.off{background:#4b2630}.stat{font-size:2rem;font-weight:800}.small{font-size:.85rem}.hidden{display:none}.dangerText{color:#ff8996}.successText{color:#6ee7b7}#loginCard{max-width:520px;margin:8vh auto 0}.label{font-size:.9rem;color:#c7d0e6;margin-top:8px;display:block}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="app">
+    <div class="row" style="justify-content:space-between">
+      <div><h1>AuraCell</h1><div class="muted">Aura X video odaları — Supabase yönetimi</div></div>
+      <button onclick="authenticateAdmin()">Google ile Yönetici Girişi</button>
+    </div>
+    <div class="grid">
+      <section class="card">
+        <h2>Odalar</h2><p class="muted">Supabase'deki odaları güvenli yönetici oturumu ile listeler.</p>
+        <div class="row" style="margin-bottom:8px">
+          <button class="secondary" onclick="selectAllRooms()">Tümünü Seç</button>
+          <button class="secondary" onclick="clearRoomSelection()">Seçimi Temizle</button>
+        </div>
+        <div id="rooms"></div>
+        <div class="row" style="margin-top:12px;border-top:1px solid #2c3855;padding-top:12px">
+          <button class="danger" onclick="lockSelected()">Seçilenleri Kilitle</button>
+          <button class="secondary" onclick="unlockSelected()">Seçilenlerin Kilidini Aç</button>
+        </div>
+        <p id="bulkMsg" class="small" style="margin-top:8px"></p>
+      </section>
+      <section class="card">
+        <h2>Seçili Oda</h2>
+        <div id="selectedEmpty" class="muted">Soldan bir oda seç.</div>
+        <div id="selected" class="hidden">
+          <div class="badge" id="roomName"></div>
+          <p id="statusLine" class="muted"></p>
+          <div class="stat" id="remaining">0 dk</div>
+          <div class="small muted" id="expireText"></div>
+          <label class="label">Verilecek süre (dakika)</label>
+          <input id="minutes" type="number" min="1" max="10080" value="60">
+          <div class="row">
+            <button onclick="grant()">YouTube'u Aç (Süre Ver)</button>
+            <button class="danger" onclick="revoke()">YouTube'u Kapat</button>
+          </div>
+          <div class="row" style="margin-top:10px;border-top:1px solid #2c3855;padding-top:10px">
+            <button class="danger" onclick="lockRoom(selectedId)">Odayı Kilitle</button>
+            <button class="secondary" onclick="unlockRoom(selectedId)">Kilidi Aç</button>
+          </div>
+          <p id="actionMsg" class="small" style="margin-top:12px"></p>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+<script src="./firebase-config.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script>
+const firebaseConfig = window.AURACELL_FIREBASE_CONFIG;
+firebase.initializeApp(firebaseConfig);
+
+const SUPABASE_URL = "https://tpfbhikihkkccmzlzgkn.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_SmUcZGqg0BimQCo2spXEkw_evh3xlMR";
+const DATA_FN = `${SUPABASE_URL}/functions/v1/aurax-data`;
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+let roomsUnsub = null, selectedId = null, selectedData = null, tick = null;
+let selectedRoomIds = new Set(), lastRoomsArr = [];
+let isVerifiedAdmin = false;
+
+const $ = id => document.getElementById(id);
+
+async function api(body) {
+  const user = firebase.auth().currentUser;
+  if (!user) throw new Error("Önce Google hesabıyla giriş yapın.");
+  const token = await user.getIdToken(true);
+  const res = await fetch(DATA_FN, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "apikey": SUPABASE_ANON_KEY,
+      "Authorization": `Bearer ${token}`
+    },
+    body: JSON.stringify(body),
+    cache: "no-store"
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || `İşlem başarısız (${res.status})`);
+    err.code = data.code;
+    throw err;
+  }
+  return data;
+}
+
+function setLoginState(message = "") {
+  $('selectedEmpty').classList.remove('hidden');
+  $('selected').classList.add('hidden');
+  $('selectedEmpty').textContent = message || "Google hesabınızı doğrulayın.";
+}
+
+async function startRooms() {
+  if (!isVerifiedAdmin) return;
+  if (roomsUnsub) roomsUnsub();
+  const poll = async () => {
+    try {
+      const out = await api({op:"list", collection:"rooms", limit:500});
+      const arr = (out.rows || []).map(r => ({id:r.doc_id, ...r.data}));
+      arr.sort((a,b) => String(a.id).localeCompare(String(b.id)));
+      lastRoomsArr = arr;
+      renderRooms();
+      if (selectedId && arr.some(x => x.id === selectedId)) selectRoom(selectedId, true);
+    } catch (e) {
+      console.error(e);
+      $('rooms').innerHTML = `<div class="dangerText">Odalar okunamadı: ${esc(e.message)}</div>`;
+    }
+  };
+  await poll();
+  const timer = setInterval(poll, 2500);
+  roomsUnsub = () => clearInterval(timer);
+}
+
+function renderRooms() {
+  const arr = lastRoomsArr;
+  $('rooms').innerHTML = arr.length ? arr.map(r => {
+    const v = r.videoAccess || {};
+    const active = !!v.enabled && Number(v.expiresAt || 0) > Date.now();
+    const locked = !!(r.roomAccess && r.roomAccess.locked);
+    const checked = selectedRoomIds.has(r.id) ? 'checked' : '';
+    return `<div class="room ${selectedId===r.id?'active':''}">
+      <div class="row" style="gap:10px;flex:1">
+        <input type="checkbox" ${checked} onclick="toggleRoomSelect('${js(r.id)}')" style="width:auto;margin:0">
+        <div><b>${esc(r.id)}</b><div class="small muted">${locked?'Oda kilitli':(active?'YouTube açık':'YouTube kapalı')} · ${r.members?.length||0} üye</div></div>
+      </div>
+      <div><span class="badge ${locked?'off':(active?'ok':'off')}">${locked?'ODA KİLİTLİ':(active?'AÇIK':'KİLİTLİ')}</span>
+      <button class="secondary" style="margin-left:6px" onclick="selectRoom('${js(r.id)}')">Yönet</button></div>
+    </div>`;
+  }).join('') : '<div class="muted">Hiç oda bulunamadı.</div>';
+}
+
+function toggleRoomSelect(id){if(selectedRoomIds.has(id))selectedRoomIds.delete(id);else selectedRoomIds.add(id);renderRooms();}
+function selectAllRooms(){lastRoomsArr.forEach(r=>selectedRoomIds.add(r.id));renderRooms();}
+function clearRoomSelection(){selectedRoomIds.clear();renderRooms();}
+
+async function lockRoom(id){
+  if(!id)return;
+  try{await api({op:"update",collection:"rooms",id,data:{roomAccess:{locked:true,lockedAt:Date.now(),lockedBy:firebase.auth().currentUser.uid}}}); msg("Oda kilitlendi.",true); await startRooms();}
+  catch(e){msg("Kilitlenemedi: "+e.message,false)}
+}
+async function unlockRoom(id){
+  if(!id)return;
+  try{await api({op:"update",collection:"rooms",id,data:{roomAccess:{locked:false,unlockedAt:Date.now(),unlockedBy:firebase.auth().currentUser.uid}}}); msg("Oda kilidi açıldı.",true); await startRooms();}
+  catch(e){msg("Kilit açılamadı: "+e.message,false)}
+}
+async function lockSelected(){
+  const ids=[...selectedRoomIds]; if(!ids.length)return $('bulkMsg').textContent='Önce oda seç.';
+  for(const id of ids) await lockRoom(id);
+  $('bulkMsg').textContent=ids.length+' oda kilitlendi.'; $('bulkMsg').className='small successText';
+}
+async function unlockSelected(){
+  const ids=[...selectedRoomIds]; if(!ids.length)return $('bulkMsg').textContent='Önce oda seç.';
+  for(const id of ids) await unlockRoom(id);
+  $('bulkMsg').textContent=ids.length+' odanın kilidi açıldı.'; $('bulkMsg').className='small successText';
+}
+
+async function selectRoom(id,silent=false){
+  selectedId=id;
+  try{
+    const out=await api({op:"get",collection:"rooms",id});
+    if(!out.row)return;
+    selectedData={id:out.row.doc_id,...out.row.data};
+    $('selectedEmpty').classList.add('hidden'); $('selected').classList.remove('hidden');
+    $('roomName').textContent=selectedData.id; renderSelected();
+    if(!silent)window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});
+  }catch(e){alert('Oda alınamadı: '+e.message)}
+}
+
+function renderSelected(){
+  if(!selectedData)return;
+  const v=selectedData.videoAccess||{}, locked=!!(selectedData.roomAccess&&selectedData.roomAccess.locked);
+  const ms=Math.max(0,Number(v.expiresAt||0)-Date.now()), active=!!v.enabled&&ms>0;
+  $('statusLine').innerHTML=(locked?'<span class="dangerText">Oda kilitli — girişe kapalı. </span>':'')+
+    (active?'<span class="successText">YouTube izni aktif.</span>':'<span class="dangerText">YouTube kilitli.</span>');
+  $('remaining').textContent=active?fmt(ms):'0 dk';
+  $('expireText').textContent=active?'Bitiş: '+new Date(v.expiresAt).toLocaleString('tr-TR'):'Süre verilmemiş.';
+}
+function fmt(ms){const sec=Math.ceil(ms/1000),h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;return h?`${h} sa ${m} dk`:m?`${m} dk ${s} sn`:`${s} sn`;}
+
+async function grant(){
+  if(!selectedId)return;
+  const mins=Math.max(1,Math.min(10080,Number($('minutes').value)||60)), now=Date.now(), expires=now+mins*60000;
+  try{
+    await api({op:"update",collection:"rooms",id:selectedId,data:{
+      videoAccess:{enabled:true,grantedMinutes:mins,grantedAt:now,expiresAt:expires,status:"active",grantedBy:firebase.auth().currentUser.uid}
+    }});
+    msg('Süre verildi: '+mins+' dakika',true); await selectRoom(selectedId,true); await startRooms();
+  }catch(e){msg('Yetki/işlem hatası: '+e.message,false)}
+}
+async function revoke(){
+  if(!selectedId)return;
+  try{
+    await api({op:"update",collection:"rooms",id:selectedId,data:{
+      videoAccess:{enabled:false,grantedMinutes:0,grantedAt:null,expiresAt:null,status:"revoked",revokedAt:Date.now(),revokedBy:firebase.auth().currentUser.uid}
+    }});
+    msg('YouTube kapatıldı.',true); await selectRoom(selectedId,true); await startRooms();
+  }catch(e){msg('İşlem başarısız: '+e.message,false)}
+}
+function msg(t,ok){$('actionMsg').textContent=t;$('actionMsg').className='small '+(ok?'successText':'dangerText');}
+
+function esc(s){return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+function js(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
+
+async function authenticateAdmin(){
+  try{
+    const result=await firebase.auth().signInWithPopup(new firebase.auth.GoogleAuthProvider());
+    const me=await api({op:"me"});
+    if(!me.isAdmin){
+      isVerifiedAdmin=false;
+      alert("Bu Google hesabı AuraCell yöneticisi olarak yetkilendirilmemiş.");
+      await firebase.auth().signOut();
+      setLoginState("Yönetici yetkisi bulunamadı.");
+      return;
+    }
+    isVerifiedAdmin=true;
+    document.title="AuraCell | Oda Video Kontrol — Yönetici";
+    await startRooms();
+  }catch(e){
+    console.error(e);
+    setLoginState("Yönetici girişi başarısız: "+e.message);
+  }
+}
+
+firebase.auth().onAuthStateChanged(async user=>{
+  if(!user){
+    isVerifiedAdmin=false;
+    setLoginState("AuraCell yöneticisi olarak Google ile giriş yapın.");
+    return;
+  }
+  try{
+    const me=await api({op:"me"});
+    if(me.isAdmin){isVerifiedAdmin=true; await startRooms();}
+    else {isVerifiedAdmin=false; await firebase.auth().signOut(); setLoginState("Bu hesap yönetici değil.");}
+  }catch(e){isVerifiedAdmin=false;setLoginState("Yetki doğrulanamadı: "+e.message);}
+});
+
+window.addEventListener("beforeunload",()=>{if(roomsUnsub)roomsUnsub();});
+</script>
+</body>
+</html>
